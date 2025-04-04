@@ -30,17 +30,20 @@ from rclpy.node import Node
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 from rclpy.duration import Duration 
 
+from cde2310_interfaces.srv import NodeFinish
+from cde2310_interfaces.srv import ActivateNode
+
 ###################################################################
 
 TIMER_PERIOD = 0.05
 
 # Pure pursuit parameters
-LOOKAHEAD_DISTANCE = 0.5  # m
-WHEEL_BASE = 0.16  # m # doesnt do anything for now
-MAX_DRIVE_SPEED = 0.1  # m/s
+LOOKAHEAD_DISTANCE = 0.5  # m original: 0.2
+WHEEL_BASE = 0.16  #  m # doesnt do anything for now
+MAX_DRIVE_SPEED = 0.2  # m/s
 MAX_TURN_SPEED = 1.25  # rad/s
 TURN_SPEED_KP = 1.25
-DISTANCE_TOLERANCE = 0.3  # m
+DISTANCE_TOLERANCE = 0.2 # m
 
 # Obstacle avoidance parameters
 OBSTACLE_AVOIDANCE_GAIN = 0.3
@@ -83,6 +86,15 @@ class PurePursuit(Node):
     def __init__(self):
         super().__init__("pure_pursuit")
 
+        # Server: Handle Start/Stop Pure Pursuit
+        self.PurePursuitServer = self.create_service(ActivateNode, 'activate_pure_pursuit', self.activate_pure_pursuit_callback)
+
+        # # Client: Inform Exploration Node If Pure Pursuit Complete
+        # self.PurePursuitStatusClient = self.create_client(NodeFinish, 'pure_pursuit_finish')
+        # while not self.PurePursuitStatusClient.wait_for_service(timeout_sec=1.0):
+        #     self.get_logger().info("Service for pure_pursuit_finish not available, waiting again...")
+        # self.isPurePursuitComplete = NodeFinish.Request()
+
         # Publishers
         self.cmd_vel_pub = self.create_publisher(
             Twist, "cmd_vel", 10
@@ -120,8 +132,31 @@ class PurePursuit(Node):
         self.enabled = True
         self.reversed = False
         self.closest_distance = float("inf")
+    
+    
+    # ############# Server Response: Handle Start/Stop Requests from Exploration Node ############# #
+    def activate_pure_pursuit_callback(self, request, response):
+        activate = request.activate
+
+        if not activate:
+            self.get_logger().info('Exploration Node has requested to **deactivate exploration**')
+            self.enabled = False
+            self.get_logger().info('Disabled Pure Pursuit.')
+            response.message = "Disabled Pure Pursuit"
+            return response
         
-        return
+        if activate:
+            self.get_logger().info('Exploration Node has requested to **activate exploration**')
+            self.enabled = True
+            self.get_logger().info('Enabled Pure Pursuit.')
+            response.message = "Enabled Pure Pursuit"
+            return response
+    
+    # ############# Client Call: Notify Exploration Node About Pure Pursuit Completion ############# # [service: pure_pursuit_finish]
+    # def pure_pursuit_complete(self, finish):
+    #     """ Sends a message to Exploration Node if pure pursuit is complete"""
+    #     self.isPurePursuitComplete.finish = finish
+    #     return self.PurePursuitStatusClient.call_async(self.isPurePursuitComplete)
 
     # Main Function
     def run_loop_callback(self):
@@ -131,11 +166,13 @@ class PurePursuit(Node):
 
         # If not enabled, do nothing
         if not self.enabled:
+            self.stop()
             return
 
         # If no path, stop
         if self.path is None or not self.path.poses:
             self.stop()
+            #self.pure_pursuit_complete(True)
             return
 
         goal = self.get_goal()
@@ -389,93 +426,6 @@ class PurePursuit(Node):
 
     def stop(self):
         self.send_speed(0.0, 0.0)
-
-
-    # Not used.
-    def run(self):
-        while rclpy.ok():
-            if self.pose is None:
-                continue
-
-            # If not enabled, do nothing
-            if not self.enabled:
-                continue
-
-            # If no path, stop
-            if self.path is None or not self.path.poses:
-                self.stop()
-                continue
-
-            goal = self.get_goal()
-
-            nearest_waypoint_index = self.find_nearest_waypoint_index()
-            lookahead = self.find_lookahead(
-                nearest_waypoint_index, LOOKAHEAD_DISTANCE
-            )
-
-            self.lookahead_pub.publish(
-                PointStamped(header=Header(frame_id="map"), point=lookahead)
-            )
-
-            # Calculate alpha (angle between target and current position)
-            position = self.pose.position
-            orientation = self.pose.orientation
-            roll, pitch, yaw = euler_from_quaternion(
-                [orientation.x, orientation.y, orientation.z, orientation.w]
-            )
-            x = position.x
-            y = position.y
-            dx = lookahead.x - x
-            dy = lookahead.y - y
-            self.alpha = float(np.arctan2(dy, dx) - yaw)
-            if self.alpha > np.pi:
-                self.alpha -= 2 * np.pi
-            elif self.alpha < -np.pi:
-                self.alpha += 2 * np.pi
-
-            # If the lookahead is behind the robot, follow the path backwards
-            self.reversed = abs(self.alpha) > np.pi / 2
-
-            # Calculate the lookahead distance and center of curvature
-            lookahead_distance = PurePursuit.distance(x, y, lookahead.x, lookahead.y)
-            radius_of_curvature = float(lookahead_distance / (2 * np.sin(self.alpha)))
-
-            # Calculate drive speed
-            drive_speed = (-1 if self.reversed else 1) * MAX_DRIVE_SPEED
-
-            # Stop if at goal
-            distance_to_goal = PurePursuit.distance(x, y, goal.x, goal.y)
-            if distance_to_goal < DISTANCE_TOLERANCE:
-                self.stop()
-                continue
-
-            # Calculate turn speed
-            turn_speed = TURN_SPEED_KP * drive_speed / radius_of_curvature
-
-            # Obstacle avoicance
-            turn_speed += self.calculate_steering_adjustment()
-
-            # Clamp turn speed
-            turn_speed = max(-MAX_TURN_SPEED, min(MAX_TURN_SPEED, turn_speed))
-
-            # Slow down if close to obstacle
-            if self.closest_distance < OBSTACLE_AVOIDANCE_MAX_SLOW_DOWN_DISTANCE:
-                drive_speed *= float(
-                    np.interp(
-                        self.closest_distance,
-                        [
-                            OBSTACLE_AVOIDANCE_MIN_SLOW_DOWN_DISTANCE,
-                            OBSTACLE_AVOIDANCE_MAX_SLOW_DOWN_DISTANCE,
-                        ],
-                        [OBSTACLE_AVOIDANCE_MIN_SLOW_DOWN_FACTOR, 1],
-                    )
-                )
-
-            # Send speed
-            self.send_speed(drive_speed, turn_speed)
-        return
-
-
 
 def main():
     rclpy.init()

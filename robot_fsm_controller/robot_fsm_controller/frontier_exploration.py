@@ -9,13 +9,14 @@ This file is based on original code and ideas by:
     https://kainakamura.com/project/slam-robot
 
 Description:
-    ROS2 Node that implements pure pursuit technique to achieve navigation,
-    using paths generated from frontier_exploration.py
+    ROS2 Node that explores frontiers and publishes best path for use in 
+    pure_pursuit.
 
 Modifications:
     - ROS2 Implementation was used instead of ROS1 Features
 ======================================================================
 """
+
 import numpy as np
 import rclpy
 import tf2_ros
@@ -33,10 +34,6 @@ from rclpy.duration import Duration
 
 # TODO: Determine if it is worth the effort to write debugging code
 
-'''
-TODO
-A ROS2 Node 
-'''
 
 ####################################################################
 '''
@@ -48,7 +45,7 @@ TIMER_PERIOD = 0.05
 '''
 TODO
 '''
-NUM_EXPLORE_FAILS_BEFORE_FINISH = 1000
+NUM_EXPLORE_FAILS_BEFORE_FINISH = 50
 
 '''
 TODO
@@ -199,6 +196,8 @@ class FrontierExploration(Node):
         if not frontiers:
             self.get_logger().warning("No Frontiers Found")
             self.no_frontiers_found_counter += 1
+            self.get_logger().warning(f"Count Before Termination: {NUM_EXPLORE_FAILS_BEFORE_FINISH}")
+            self.get_logger().warning(f"Current Count: {self.no_frontiers_found_counter}")
             self.check_if_finished_exploring()
             return
         else:
